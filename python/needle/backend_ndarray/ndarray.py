@@ -1,3 +1,4 @@
+import builtins
 import operator
 import math
 from functools import reduce
@@ -16,6 +17,7 @@ class BackendDevice:
 
     def __init__(self, name, mod):
         self.name = name
+        # mod holds the module implementation that implements all functions
         self.mod = mod
 
     def __eq__(self, other):
@@ -24,7 +26,9 @@ class BackendDevice:
     def __repr__(self):
         return self.name + "()"
 
+    # 通过定义__getattr__方法，device.name(例如device.compact())全部转化为self.mod.name, 实现同一函数名针对不同backend的dispatch
     def __getattr__(self, name):
+        # equal to self.mod.name
         return getattr(self.mod, name)
 
     def enabled(self):
@@ -116,10 +120,13 @@ class NDArray:
             self._init(array)
 
     def _init(self, other):
+        # 在Python OOP中，可以使用带下划线的属性名来表示内部属性
+        # 对于可以公开的属性值，再用@property公开
         self._shape = other._shape
         self._strides = other._strides
         self._offset = other._offset
         self._device = other._device
+        # A class objected that stores the underlying memory(row major) of the array
         self._handle = other._handle
 
     @staticmethod
@@ -132,6 +139,10 @@ class NDArray:
             stride *= shape[-i]
         return tuple(res[::-1])
 
+    # If handle is not specified (i.e., no pre-existing memory is referenced), then the call will allocate the needed memory
+    # but if handle is specified then no new memory is allocated, but the new NDArray points the same memory as the old one
+    # 对于很多操作，例如广播，切片，转置等，通过只修改strdes和offset，不改变底层handle，就可以实现zero copy
+    # 在底层存储不变的情况下修改上层的视图(view)
     @staticmethod
     def make(shape, strides=None, device=None, handle=None, offset=0):
         """Create a new NDArray with the given properties.  This will allocation the
@@ -143,6 +154,8 @@ class NDArray:
         array._offset = offset
         array._device = device if device is not None else default_device()
         if handle is None:
+            # device.Array对应cuda实现中的struct CudaArray或者cpu实现中的struct AlignedArray
+            # 又或者是numpy实现里的class Array
             array._handle = array.device.Array(prod(shape))
         else:
             array._handle = handle
@@ -175,6 +188,7 @@ class NDArray:
     def size(self):
         return prod(self._shape)
 
+    # for string representation
     def __repr__(self):
         return "NDArray(" + self.numpy().__str__() + f", device={self.device})"
 
@@ -247,7 +261,16 @@ class NDArray:
         """
 
         ### BEGIN YOUR SOLUTION
-        raise NotImplementedError()
+        if self.size != prod(new_shape) or not self.is_compact():
+            raise ValueError()
+
+        # new_strides = [reduce(operator.mul, new_shape[dim + 1:], 1) for dim in range(len(new_shape) - 1)]
+        # # last dim stride
+        # new_strides.append(1)
+
+        # 已经提供了通过shape求strides的函数
+        new_strides = NDArray.compact_strides(new_shape)
+        return self.as_strided(shape=new_shape, strides=new_strides)
         ### END YOUR SOLUTION
 
     def permute(self, new_axes):
@@ -272,7 +295,10 @@ class NDArray:
         """
 
         ### BEGIN YOUR SOLUTION
-        raise NotImplementedError()
+        new_shape = [self._shape[axis] for axis in new_axes]
+        # permute strides
+        new_strides = [self._strides[axis] for axis in new_axes]
+        return self.as_strided(shape=tuple(new_shape), strides=tuple(new_strides))
         ### END YOUR SOLUTION
 
     def broadcast_to(self, new_shape):
@@ -296,7 +322,19 @@ class NDArray:
         """
 
         ### BEGIN YOUR SOLUTION
-        raise NotImplementedError()
+        # numpy的广播策略是将维度先`右`对齐，然后从右往左比较
+        # 所以如果维数增加(如1D->2D)，将input_shape缺失的维度从左开始填1与output_shape对齐
+        shape_diff = len(new_shape) - len(self._shape)
+        tmp_shape = [1] * shape_diff + list(self._shape)
+        new_strides = [0] * shape_diff + list(self._strides)
+        for i in range(shape_diff, len(new_shape)):
+            # 检查哪些维度要被扩展
+            assert new_shape[i] == tmp_shape[i] or tmp_shape[i] == 1
+            # if new_shape[i] != tmp_shape[i] and tmp_shape[i] == 1:
+            # https://github.com/kcxain/dlsys/issues/1
+            if tmp_shape[i] == 1:
+                new_strides[i] = 0
+        return self.as_strided(shape=new_shape, strides=tuple(new_strides),)
         ### END YOUR SOLUTION
 
     ### Get and set elements
@@ -306,6 +344,7 @@ class NDArray:
         start, stop, step = sl.start, sl.stop, sl.step
         if start == None:
             start = 0
+        # https://github.com/dlsyscourse/hw3/issues/2
         if start < 0:
             start = self.shape[dim]
         if stop == None:
@@ -363,7 +402,20 @@ class NDArray:
         assert len(idxs) == self.ndim, "Need indexes equal to number of dimensions"
 
         ### BEGIN YOUR SOLUTION
-        raise NotImplementedError()
+        # One thing to note is that the __getitem__() call, unlike numpy, will never change the number of dimensions in the array
+        # (a + b - 1) / b 实现向上取整
+        new_shape = [(slice_tuple.stop - slice_tuple.start + slice_tuple.step - 1) // slice_tuple.step for slice_tuple in idxs]
+        # 从stride的定义出发，stride[i]表示第i个维度上移动“一个单位”需要在内存上跳过多少个元素
+        # 当切片的step为正数时，需要跳过的元素数量就扩大step倍
+        new_strides = [stride * slice_tuple.step for stride, slice_tuple in zip(self._strides, idxs)]
+        # 就从index为0入手推导offset，想想index都为0时应该拿到底层存储的哪个元素(因为index都为0时，strides不起作用，只有offset起作用)
+        # ndarray.py中还有一个sum同名函数（名字取的不好），为了避免冲突要指定使用内置的sum
+        new_offset = builtins.sum([slice_tuple.start * stride for stride, slice_tuple in zip(self._strides, idxs)])
+        return self.make(shape=tuple(new_shape),
+                         strides=tuple(new_strides),
+                         device=self.device,
+                         handle=self._handle,
+                         offset=new_offset)
         ### END YOUR SOLUTION
 
     def __setitem__(self, idxs, other):

@@ -1,3 +1,6 @@
+import sys
+
+sys.path.append("/home/tang22/CMU_DLSys/cmu_dlsys_hw3/python")
 import numpy as np
 import pytest
 import mugrade
@@ -325,6 +328,12 @@ def test_getitem(device, params):
 
 broadcast_params = [
     {"from_shape": (1, 3, 4), "to_shape": (6, 3, 4)},
+    # add by myself
+    {"from_shape": (3, 2, 1, 2), "to_shape": (3, 2, 2, 2)},
+    {"from_shape": (3, 1, 1, 2), "to_shape": (3, 2, 2, 2)},
+    {"from_shape": (3, 1, 1, 2), "to_shape": (3, 1, 2, 2)},
+    {"from_shape": (3, 1, 1), "to_shape": (3, 1, 2)},
+    {"from_shape": (3, 1, 1), "to_shape": (3, 1, 1)},
 ]
 
 
